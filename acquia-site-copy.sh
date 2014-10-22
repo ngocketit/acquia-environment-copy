@@ -102,7 +102,7 @@ __get_server_url_suffix()
     esac
   done
 
-  [ ! -z "$SERVER_NAME"] && [ ! -z "$SERVER_URL_SUFFIX" ] && SERVER_URL=${SERVER_NAME}.${SERVER_URL_SUFFIX}
+  [ ! -z "$SERVER_NAME" ] && [ ! -z "$SERVER_URL_SUFFIX" ] && SERVER_URL=${SERVER_NAME}.${SERVER_URL_SUFFIX}
 }
 
 
@@ -228,6 +228,14 @@ __prompt_user_input()
   echo $answer
 }
 
+__print_command_status()
+{
+  if [ $? -eq 0 ]; then
+    echo -e "${txtGreen}$1: ${txtOff}[ OK ]"
+  else
+    echo -e "${txtGreen}$1: ${txtOff}[${txtRed} ERROR ${txtOff}]"
+  fi
+}
 
 __get_sync_file_method()
 {
@@ -290,7 +298,7 @@ __get_options()
   fi
 
   if [ "$OPTION" == "all" -o "$OPTION" == "file" ]; then
-    __get_sync_file_method
+    [ -z "$SYNC_FILE_METHOD" ] && __get_sync_file_method
   fi
 }
 
@@ -411,49 +419,37 @@ __update_database()
   local db_file=db_backup_${SITE_NAME}_${ENVIRONMENT}_$(date +%Y_%m_%d_%H_%M).sql
   local multisite_opt_remote=$(__get_drush_multisite_opt $SITE_URL)
   local multisite_opt_local=$(__get_drush_multisite_opt)
+  local import_result
 
-  __print_info "Generating database snapshot on server $SERVER_URL. This may take a while"
+  __print_info "Generate database snapshot on server $SERVER_URL. This may take a while"
 
   # Dump the remote database
   __issue_ssh_drush_command "drush @${SITE_NAME}.${ENVIRONMENT} sql-dump $multisite_opt_remote --gzip > /tmp/$db_file.gz"
 
   # Copy the database dump to local
-  __print_info "Copying remote database dump to your local"
+  __print_info "Copy remote database dump to local"
   scp $SITE_NAME@$SERVER_URL:/tmp/$db_file.gz /tmp/
 
   # Unzip the database dump file 
-  cd /tmp
-  gunzip $db_file.gz >/dev/null 2>&1
-  DB_UPDATE_RET=$?
+  __print_command_status "Unzip database dump" $(cd /tmp; gunzip $db_file.gz >/dev/null 2>&1; DB_UPDATE_RET=$?)
 
   # Only proceed if the command succeeds. Otherwise, we may drop the local database totally.
   if [ $DB_UPDATE_RET -eq 0 ]; then
 
     cd $LOCAL_DOCROOT
-    db_backup=local_db_backup_${SITE_NAME}_$(date +%Y_%m_%d_%H_%M).sql
-    __print_info "Making a local database backup to /tmp/$db_backup"
-    drush sql-dump > /tmp/$db_backup 2>&1
+    local db_backup=local_db_backup_${SITE_NAME}_$(date +%Y_%m_%d_%H_%M).sql
 
-    # Drop the current local database
-    __print_info "Dropping all local database tables"
-    __issue_local_drush_command "sql-drop --yes"
+    __print_command_status "Make a backup of local database (/tmp/$db_backup)" $(drush $multisite_opt_local sql-dump > /tmp/$db_backup 2>&1)
 
-    __print_info "Importing remote database dump"
-    drush $multisite_opt_local sql-cli < /tmp/$db_file
+    __print_command_status "Drop all local database tables" $(__issue_local_drush_command "sql-drop --yes")
 
-    local import_result=$?
+    __print_command_status "Import remote database dump" $(drush $multisite_opt_local sql-cli < /tmp/$db_file; import_result=$?)
 
-    __print_info "Removing temporary database dump files on remote server"
+    __print_command_status "Remove temporary database dump files on local" $(rm -f /tmp/$db_file.gz; rm -f /tmp/$db_file)
 
-    rm -f /tmp/$db_file.gz
-    rm -f /tmp/$db_file
+    __print_command_status "Remove temporary database dump files on server" $(ssh $SITE_NAME@$SERVER_URL "cd /tmp; rm -f $db_file.gz")
 
-    ssh $SITE_NAME@$SERVER_URL "
-    cd /tmp
-    rm -f $db_file.gz"
-
-    if [ $import_result -eq 0 ]; then
-      echo "Post database update"
+    if [ "$import_result" == "0" ]; then
       __post_database_update
     fi
   else
@@ -470,11 +466,16 @@ __print_banner()
   echo
 }
 
+
+__print_footer()
+{
+  __print_warning "DONE!"
+}
+
 __put_site_offline()
 {
   cd $LOCAL_DOCROOT
-  __print_info "Putting site into maintenance mode"
-  __issue_local_drush_command "vset maintenance_mode 1"
+  __print_command_status "Put site into maintenance mode" $(__issue_local_drush_command "vset maintenance_mode 1")
 }
 
 
@@ -499,23 +500,17 @@ __get_drush_multisite_opt()
 __post_database_update()
 {
   cd $LOCAL_DOCROOT
-  __print_info "Disable Securepages module"
-  __issue_local_drush_command "vset securepages_enable --exact 0"
+  __print_command_status "Disable Securepages module" $(__issue_local_drush_command "vset securepages_enable --exact 0")
 
-  __print_info "Disable Shield module"
-  __issue_local_drush_command "dis --yes shield"
+  __print_command_status "Disable Shield module" $(__issue_local_drush_command "dis --yes shield")
 
-  __print_info "Enable Devel module"
-  __issue_local_drush_command "en --yes devel"
+  __print_command_status "Enable Devel module" $(__issue_local_drush_command "en --yes devel")
 
-  __print_info "Disable CSS caching"
-  __issue_local_drush_command "vset preprocess_css 0 --exact --yes"
+  __print_command_status "Disable CSS caching" $(__issue_local_drush_command "vset preprocess_css 0 --exact --yes")
 
-  __print_info "Disable JS caching"
-  __issue_local_drush_command "vset preprocess_js 0 --exact --yes"
+  __print_command_status "Disable JS caching" $(__issue_local_drush_command "vset preprocess_js 0 --exact --yes")
 
-  __print_info "Disable page caching"
-  __issue_local_drush_command "vset cache 0 --exact --yes"
+  __print_command_status "Disable page caching" $(__issue_local_drush_command "vset cache 0 --exact --yes")
 
   # Remove FirePHPCore downloaded by devel module
   [ -d $LOCAL_DOCROOT/FirePHPCore ] && rm -r $LOCAL_DOCROOT/FirePHPCore
@@ -524,8 +519,7 @@ __post_database_update()
 __put_site_online()
 {
   cd $LOCAL_DOCROOT
-  __print_info "Putting site back to online"
-  __issue_local_drush_command "vset maintenance_mode --exact 0"
+  __print_command_status "Put site back to online" $(__issue_local_drush_command "vset maintenance_mode --exact 0")
 }
 
 __clear_cache()
@@ -533,12 +527,10 @@ __clear_cache()
   local os=$(__get_os)
 
   if [ "$os" == "linux" ]; then
-    __print_info "Restart memcached"
-    sudo service memcached restart >/dev/null 2>&1
+    __print_command_status "Restart memcached" $(sudo service memcached restart >/dev/null 2>&1)
   fi
 
-  __print_info "Clearing the cache"
-  __issue_local_drush_command "cache-clear all"
+  __print_command_status "Clear all cache" $(__issue_local_drush_command "cache-clear all")
 }
 
 
@@ -556,7 +548,7 @@ __sync_files_download()
   fi
 
   local server_files_folder=/mnt/files/${SITE_NAME}.${ENVIRONMENT}/sites/default
-  __print_info "Syncing files with remote server"
+  __print_info "Sync files with remote server"
 
   if [ "$MULTISITE" == "y" ]; then
     server_files_folder=/mnt/files/$SITE_NAME.${ENVIRONMENT}/sites/$SUB_SITE_NAME
@@ -602,11 +594,8 @@ __sync_files_stage_proxy()
   local multisite_opt=$(__get_drush_multisite_opt)
 
   cd $LOCAL_DOCROOT
-  __print_info "Enable stage_file_proxy module"
-  __issue_local_drush_command "en -y stage_file_proxy"
-
-  __print_info "Set stage_file_proxy_origin"
-  __issue_local_drush_command "vset stage_file_proxy_origin $SITE_URL"
+  __print_command_status "Enable stage_file_proxy module" $(__issue_local_drush_command "en -y stage_file_proxy")
+  __print_command_status "Set stage_file_proxy_origin" $(__issue_local_drush_command "vset stage_file_proxy_origin $SITE_URL")
 }
 
 __save_params()
@@ -687,7 +676,7 @@ __reuse_cache()
 
 __cache_operations()
 {
-  local operations=("Remove site" "Use site settings" "Nothing (quit)") opt
+  local operations=("Remove site" "Import site" "Nothing (quit)") opt
   __print_info "\nWhat do you want to do with cache files?"
 
   select opt in "${operations[@]}"; do
@@ -809,4 +798,5 @@ if [ "$confirm" == "y" -o "$confirm" == "Y" ]; then
 
   __put_site_online
   __clear_cache
+  __print_footer
 fi
