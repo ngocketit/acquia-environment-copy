@@ -707,6 +707,9 @@ if [ $# -eq 1 ]; then
     *) 
       if [ -f $PARAMS_CACHE_DIR/$1 ]; then
         source $PARAMS_CACHE_DIR/$1
+      else
+        __print_error "Unknown parameter. Aborted!"
+        exit 1
       fi
       ;;
   esac
