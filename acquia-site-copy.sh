@@ -24,7 +24,7 @@ SCRIPT_NAME="$0"
 
 
 # Results of oprations
-DB_UPDATE_RET=0
+DB_UPDATE_RET=1
 FILE_UPDATE_RET=0
 
 # Some global variables
@@ -358,7 +358,7 @@ __confirm_options()
       echo -e "${i}) ${txtYellow}${labels[$i]}${txtOff}: ${txtWhite}${values[$i]}${txtOff}"
     done
 
-    __print_prompt "Your choice:"
+    __print_prompt "Your choice [Accept]:"
     read index
 
     case $index in
@@ -419,7 +419,7 @@ __update_database()
   local db_file=db_backup_${SITE_NAME}_${ENVIRONMENT}_$(date +%Y_%m_%d_%H_%M).sql
   local multisite_opt_remote=$(__get_drush_multisite_opt $SITE_URL)
   local multisite_opt_local=$(__get_drush_multisite_opt)
-  local import_result
+  local import_status=1
 
   __print_info "Generate database snapshot on server $SERVER_URL. This may take a while"
 
@@ -431,7 +431,8 @@ __update_database()
   scp $SITE_NAME@$SERVER_URL:/tmp/$db_file.gz /tmp/
 
   # Unzip the database dump file 
-  __print_command_status "Unzip database dump" $(cd /tmp; gunzip $db_file.gz >/dev/null 2>&1; DB_UPDATE_RET=$?)
+  cd /tmp; gunzip $db_file.gz >/dev/null 2>&1; DB_UPDATE_RET=$?
+  __print_command_status "Unzip database dump"
 
   # Only proceed if the command succeeds. Otherwise, we may drop the local database totally.
   if [ $DB_UPDATE_RET -eq 0 ]; then
@@ -439,19 +440,27 @@ __update_database()
     cd $LOCAL_DOCROOT
     local db_backup=local_db_backup_${SITE_NAME}_$(date +%Y_%m_%d_%H_%M).sql
 
-    __print_command_status "Make a backup of local database (/tmp/$db_backup)" $(drush $multisite_opt_local sql-dump > /tmp/$db_backup 2>&1)
 
-    __print_command_status "Drop all local database tables" $(__issue_local_drush_command "sql-drop --yes")
+    if [ -f /tmp/$db_file ]; then
+      __print_command_status "Make a backup of local database (/tmp/$db_backup)" $(drush $multisite_opt_local sql-dump > /tmp/$db_backup 2>&1)
 
-    __print_command_status "Import remote database dump" $(drush $multisite_opt_local sql-cli < /tmp/$db_file; import_result=$?)
+      __print_command_status "Drop all local database tables" $(__issue_local_drush_command "sql-drop --yes")
 
-    __print_command_status "Remove temporary database dump files on local" $(rm -f /tmp/$db_file.gz; rm -f /tmp/$db_file)
+      drush $multisite_opt_local sql-cli < /tmp/$db_file; import_status=$?
+      __print_command_status "Import remote database dump"
 
-    __print_command_status "Remove temporary database dump files on server" $(ssh $SITE_NAME@$SERVER_URL "cd /tmp; rm -f $db_file.gz")
+      __print_command_status "Remove temporary database dump files on local" $(rm -f /tmp/$db_file.gz; rm -f /tmp/$db_file)
 
-    if [ "$import_result" == "0" ]; then
-      __post_database_update
+      __print_command_status "Remove temporary database dump files on server" $(ssh $SITE_NAME@$SERVER_URL "cd /tmp; rm -f $db_file.gz")
+
+      if [ $import_status -eq 0 ]; then
+        __post_database_update
+        __restart_memcache
+      fi
+    else
+      __print_error "Database dump file is corrupted. No action done"
     fi
+
   else
     __print_error "Remote database dump is invalid. Please check your settings"
   fi
@@ -522,14 +531,17 @@ __put_site_online()
   __print_command_status "Put site back to online" $(__issue_local_drush_command "vset maintenance_mode --exact 0")
 }
 
-__clear_cache()
+__restart_memcache()
 {
   local os=$(__get_os)
 
   if [ "$os" == "linux" ]; then
     __print_command_status "Restart memcached" $(sudo service memcached restart >/dev/null 2>&1)
   fi
+}
 
+__clear_cache()
+{
   __print_command_status "Clear all cache" $(__issue_local_drush_command "cache-clear all")
 }
 
