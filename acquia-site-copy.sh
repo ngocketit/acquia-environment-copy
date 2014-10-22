@@ -13,7 +13,7 @@ MULTISITE=""
 LOCAL_SITE_URL=""
 SITE_URL=""
 SUB_SITE_NAME=""
-SERVER_URL_SUFFIX=prod.hosting.acquia.com
+SERVER_URL_SUFFIX=""
 SERVER_NAME=""
 SERVER_URL=""
 SYNC_FILE_METHOD=proxy
@@ -83,7 +83,33 @@ __get_server_name()
     __print_prompt "Acquia server name without .prod.hosting.acquia.com (for example, staging-4605): "
     read SERVER_NAME
   fi
-  SERVER_URL=${SERVER_NAME}.${SERVER_URL_SUFFIX}
+
+  [ ! -z "$SERVER_NAME" ] && [ ! -z "$SERVER_URL_SUFFIX" ] && SERVER_URL=${SERVER_NAME}.${SERVER_URL_SUFFIX}
+}
+
+
+__get_server_url_suffix()
+{
+  local suffices=("prod.hosting.acquia.com" "devcloud.hosting.acquia.com") suffix
+  select SERVER_URL_SUFFIX in "${suffices[@]}"; do
+    case $REPLY in
+      1|2)
+        break
+        ;;
+      *)
+        __print_error "Invalid selection. Please try again!"
+        ;;
+    esac
+  done
+
+  [ ! -z "$SERVER_NAME"] && [ ! -z "$SERVER_URL_SUFFIX" ] && SERVER_URL=${SERVER_NAME}.${SERVER_URL_SUFFIX}
+}
+
+
+__check_server_is_live()
+{
+  ping -c 1 $SERVER_URL >/dev/null 2>&1
+  echo $?
 }
 
 
@@ -252,6 +278,7 @@ __get_options()
   __confirm_existing
 
   [ -z "$SERVER_NAME" ] && __get_server_name
+  [ -z "$SERVER_URL_SUFFIX" ] && __get_server_url_suffix
   [ -z "$OPTION" ] && __get_copy_option
   [ -z "$LOCAL_DOCROOT" ] && __get_local_docroot
   [ -z "$MULTISITE" ] && __get_multisite
@@ -302,6 +329,7 @@ __confirm_options()
   labels[8]="Local site URL"
   labels[9]="Local docroot"
   labels[10]="Sync file method"
+  labels[11]="Server URL suffix"
 
   while [ -z "$quit" ]; do
     __print_info "Enter the number of your choice to modify the information"
@@ -316,6 +344,7 @@ __confirm_options()
     values[8]="$LOCAL_SITE_URL"
     values[9]="$LOCAL_DOCROOT"
     values[10]="$SYNC_FILE_METHOD"
+    values[11]="$SERVER_URL_SUFFIX"
 
     for (( i=1; i<=${#labels[@]}; i++ )); do
       echo -e "${i}) ${txtYellow}${labels[$i]}${txtOff}: ${txtWhite}${values[$i]}${txtOff}"
@@ -346,6 +375,9 @@ __confirm_options()
       10)
         __get_sync_file_method
         ;;
+      11)
+        __get_server_url_suffix
+        ;;
       *)
         quit=yes
         ;;
@@ -360,17 +392,29 @@ __issue_ssh_drush_command()
 }
 
 
+__issue_local_drush_command()
+{
+  local multisite_opt_local=$(__get_drush_multisite_opt)
+  drush $multisite_opt_local $1 >/dev/null 2>&1
+  return $?
+}
+
+
 # Dump the remote database and update local one
 __update_database()
 {
+  if [ ! "$(__check_server_is_live)" -eq 0 ]; then
+    __print_error "Can not access server at ${SERVER_URL}. Please check that server name & suffix are correct"
+    return 1
+  fi
+
   local db_file=db_backup_${SITE_NAME}_${ENVIRONMENT}_$(date +%Y_%m_%d_%H_%M).sql
   local multisite_opt_remote=$(__get_drush_multisite_opt $SITE_URL)
   local multisite_opt_local=$(__get_drush_multisite_opt)
 
-  __print_info "Generating database snapshot from server $SERVER_URL. This may take a while"
+  __print_info "Generating database snapshot on server $SERVER_URL. This may take a while"
 
   # Dump the remote database
-  echo "drush @${SITE_NAME}.${ENVIRONMENT} sql-dump $multisite_opt_remote --gzip > /tmp/$db_file.gz"
   __issue_ssh_drush_command "drush @${SITE_NAME}.${ENVIRONMENT} sql-dump $multisite_opt_remote --gzip > /tmp/$db_file.gz"
 
   # Copy the database dump to local
@@ -388,15 +432,14 @@ __update_database()
     cd $LOCAL_DOCROOT
     db_backup=local_db_backup_${SITE_NAME}_$(date +%Y_%m_%d_%H_%M).sql
     __print_info "Making a local database backup to /tmp/$db_backup"
-
-    drush sql-dump $multisite_opt_local > /tmp/$db_backup
+    drush sql-dump > /tmp/$db_backup 2>&1
 
     # Drop the current local database
     __print_info "Dropping all local database tables"
-    drush sql-drop $multisite_opt_local --yes
+    __issue_local_drush_command "sql-drop --yes"
 
     __print_info "Importing remote database dump"
-    drush sql-cli $multisite_opt_local < /tmp/$db_file
+    drush $multisite_opt_local sql-cli < /tmp/$db_file
 
     local import_result=$?
 
@@ -410,6 +453,7 @@ __update_database()
     rm -f $db_file.gz"
 
     if [ $import_result -eq 0 ]; then
+      echo "Post database update"
       __post_database_update
     fi
   else
@@ -428,11 +472,9 @@ __print_banner()
 
 __put_site_offline()
 {
-  local multisite_opt=$(__get_drush_multisite_opt)
-
   cd $LOCAL_DOCROOT
   __print_info "Putting site into maintenance mode"
-  drush vset $multisite_opt maintenance_mode 1
+  __issue_local_drush_command "vset maintenance_mode 1"
 }
 
 
@@ -456,17 +498,24 @@ __get_drush_multisite_opt()
 # This only needs to be run when database update succeeds
 __post_database_update()
 {
-  local multisite_opt=$(__get_drush_multisite_opt)
-
   cd $LOCAL_DOCROOT
-  drush vset $multisite_opt securepages_enable --exact 0
-  drush dis $multisite_opt --yes shield
+  __print_info "Disable Securepages module"
+  __issue_local_drush_command "vset securepages_enable --exact 0"
 
-  # Enable devel and disable performance settings
-  drush en $multisite_opt --yes devel
-  drush vset $multisite_opt preprocess_css 0 --exact --yes
-  drush vset $multisite_opt preprocess_js 0 --exact --yes
-  drush vset $multisite_opt cache 0 --exact --yes
+  __print_info "Disable Shield module"
+  __issue_local_drush_command "dis --yes shield"
+
+  __print_info "Enable Devel module"
+  __issue_local_drush_command "en --yes devel"
+
+  __print_info "Disable CSS caching"
+  __issue_local_drush_command "vset preprocess_css 0 --exact --yes"
+
+  __print_info "Disable JS caching"
+  __issue_local_drush_command "vset preprocess_js 0 --exact --yes"
+
+  __print_info "Disable page caching"
+  __issue_local_drush_command "vset cache 0 --exact --yes"
 
   # Remove FirePHPCore downloaded by devel module
   [ -d $LOCAL_DOCROOT/FirePHPCore ] && rm -r $LOCAL_DOCROOT/FirePHPCore
@@ -474,11 +523,9 @@ __post_database_update()
 
 __put_site_online()
 {
-  local multisite_opt=$(__get_drush_multisite_opt)
-
   cd $LOCAL_DOCROOT
   __print_info "Putting site back to online"
-  drush vset $multisite_opt maintenance_mode --exact 0
+  __issue_local_drush_command "vset maintenance_mode --exact 0"
 }
 
 __clear_cache()
@@ -486,11 +533,12 @@ __clear_cache()
   local os=$(__get_os)
 
   if [ "$os" == "linux" ]; then
+    __print_info "Restart memcached"
     sudo service memcached restart >/dev/null 2>&1
   fi
 
   __print_info "Clearing the cache"
-  drush cache-clear $multisite_opt all
+  __issue_local_drush_command "cache-clear all"
 }
 
 
@@ -502,6 +550,11 @@ __get_os()
 
 __sync_files_download()
 {
+  if [ ! $(__check_server_is_live) -eq 0 ]; then
+    __print_error "Can not access server at ${SERVER_URL}. Please check that server name & suffix are correct"
+    return 1
+  fi
+
   local server_files_folder=/mnt/files/${SITE_NAME}.${ENVIRONMENT}/sites/default
   __print_info "Syncing files with remote server"
 
@@ -549,8 +602,11 @@ __sync_files_stage_proxy()
   local multisite_opt=$(__get_drush_multisite_opt)
 
   cd $LOCAL_DOCROOT
-  drush en -y $multisite_opt stage_file_proxy
-  drush variable-set $multisite_opt stage_file_proxy_origin $SITE_URL
+  __print_info "Enable stage_file_proxy module"
+  __issue_local_drush_command "en -y stage_file_proxy"
+
+  __print_info "Set stage_file_proxy_origin"
+  __issue_local_drush_command "vset stage_file_proxy_origin $SITE_URL"
 }
 
 __save_params()
@@ -565,6 +621,7 @@ __save_params()
     echo "ENVIRONMENT=$ENVIRONMENT" >> $cache_file
     echo "OPTION=$OPTION" >> $cache_file
     echo "SERVER_NAME=$SERVER_NAME" >> $cache_file
+    echo "SERVER_URL_SUFFIX=$SERVER_URL_SUFFIX" >> $cache_file
     echo "SERVER_URL=${SERVER_NAME}.${SERVER_URL_SUFFIX}" >> $cache_file
     echo "SITE_NAME=$SITE_NAME" >> $cache_file
     echo "MULTISITE=$MULTISITE" >> $cache_file
@@ -607,10 +664,12 @@ __remove_cache()
 {
   __list_cache_files "Remove cache file"
 
-  if [ -f $CHOSEN_CACHE_FILE ]; then
+  if [ ! -z "$CHOSEN_CACHE_FILE" ] && [ -f $CHOSEN_CACHE_FILE ]; then
     rm "$CHOSEN_CACHE_FILE"
+    [ $? -eq 0 ] && __print_info "File removed" || __print_error "Failed to remove file"
   else
     __print_error "Invalid option. Aborted!"
+    exit 1
   fi
 }
 
@@ -618,10 +677,11 @@ __remove_cache()
 __reuse_cache()
 {
   __list_cache_files "Import using cache file"
-  if [ -f "$CHOSEN_CACHE_FILE" ]; then
+  if [ ! -z "$CHOSEN_CACHE_FILE" ] && [ -f $CHOSEN_CACHE_FILE ]; then
     source $CHOSEN_CACHE_FILE
   else
     __print_error "Invalid option. Aborted!"
+    exit 1
   fi
 }
 
@@ -651,7 +711,7 @@ __cache_operations()
 
 __print_cached_database()
 {
-  if [ -d $PARAMS_CACHE_DIR ]; then
+  if [ -d $PARAMS_CACHE_DIR ] && [ ! -z "$(ls $PARAMS_CACHE_DIR)" ]; then
     cd $PARAMS_CACHE_DIR
     local labels values
 
@@ -665,6 +725,7 @@ __print_cached_database()
     labels[8]="Local site URL"
     labels[9]="Local docroot"
     labels[10]="Sync file method"
+    labels[11]="Server URL suffix"
 
     for file in $(ls $PARAMS_CACHE_DIR); do
       source $file
@@ -679,6 +740,7 @@ __print_cached_database()
       values[8]="$LOCAL_SITE_URL"
       values[9]="$LOCAL_DOCROOT"
       values[10]="$SYNC_FILE_METHOD"
+      values[11]="$SERVER_URL_SUFFIX"
 
       __print_info "\n$file"
 
@@ -688,6 +750,9 @@ __print_cached_database()
     done
 
     __cache_operations
+  else
+    __print_warning "There is no files in the cache"
+    exit 1
   fi
 }
 
