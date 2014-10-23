@@ -509,11 +509,13 @@ __get_drush_multisite_opt()
 __post_database_update()
 {
   cd $LOCAL_DOCROOT
+  __print_command_status "Enable Devel module" $(__issue_local_drush_command "en --yes devel")
+
+  __print_command_status "Enable Views UI module" $(__issue_local_drush_command "en --yes views_ui")
+
   __print_command_status "Disable Securepages module" $(__issue_local_drush_command "vset securepages_enable --exact 0")
 
   __print_command_status "Disable Shield module" $(__issue_local_drush_command "dis --yes shield")
-
-  __print_command_status "Enable Devel module" $(__issue_local_drush_command "en --yes devel")
 
   __print_command_status "Disable CSS caching" $(__issue_local_drush_command "vset preprocess_css 0 --exact --yes")
 
