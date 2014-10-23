@@ -5,6 +5,10 @@
 #               Author: phi.vanngoc@activearkjwt.com          #
 ###############################################################
 
+VERSION=0.0
+REPOS_URL=http://104.131.99.199/acquia-site-copy.sh
+INSTALL_PATH=/usr/local/bin/acquia-site-copy
+
 SITE_NAME=""
 ENVIRONMENT=""
 OPTION=""
@@ -112,6 +116,66 @@ __check_server_is_live()
   echo $?
 }
 
+
+__do_self_update()
+{
+  sudo mv $1 $INSTALL_PATH; [ -f $INSTALL_PATH ]; sudo chmod a+x $INSTALL_PATH; local status=$?
+  __print_command_status "Self update"
+  [ $status -eq 0 ] && __print_info "You need to relaunch the script, quit now!" && exit
+}
+
+__get_new_version()
+{
+  local tmp_file="/tmp/acquia-site-copy_$(date +%Y_%m_%d_%H_%M).sh" answer
+  curl -o $tmp_file $REPOS_URL 2>/dev/null
+
+  if [ -f $tmp_file ]; then
+    local version=$(egrep "VERSION=[0-9\.]+" $tmp_file)
+    version=${version#VERSION=}
+    [ ! -z "$version" ] && [ "$version" != "$VERSION" ] &&  echo $tmp_file || echo ""
+  else
+    echo ""
+  fi
+}
+
+
+__check_update_requirements()
+{
+  which curl >/dev/null 2>&1
+  return $?
+}
+
+__confirm_update()
+{
+  echo -e -n "${txtGreen}UPDATE:${txtOff} ${txtYellow}There is a new version of the script, do you want to update it now?${txtOff} [y/n] "
+  read answer
+
+  case $answer in
+    y|Y)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+
+__check_update()
+{
+  __check_update_requirements
+  local req_status=$?
+
+  [ ! $? -eq 0 ] && [ "$1" == "verbose" ] && __print_error "You dont have curl installed. Please install it first." && exit 1
+  [ ! $req_status -eq 0 ] && [ "$1" != "verbose" ] && return 1
+
+  local new_version=$(__get_new_version)
+  if [ ! -z "$new_version" ]; then
+    __confirm_update && __do_self_update $new_version || [ "$1" == "verbose" ] && exit
+  else
+    [ "$1" == "verbose" ] && __print_warning "No update available" && exit
+  fi
+}
 
 __get_copy_option()
 {
@@ -772,6 +836,10 @@ if [ $# -eq 1 ]; then
       __print_cached_database
       ;;
 
+    --update|-update)
+      __check_update verbose
+      ;;
+
     *) 
       if [ -f $PARAMS_CACHE_DIR/$1 ]; then
         source $PARAMS_CACHE_DIR/$1
@@ -782,6 +850,7 @@ if [ $# -eq 1 ]; then
       ;;
   esac
 else
+  __check_update
   __get_options "$@"
 fi
 
