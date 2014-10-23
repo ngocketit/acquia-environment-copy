@@ -5,7 +5,7 @@
 #               Author: phi.vanngoc@activearkjwt.com          #
 ###############################################################
 
-VERSION=0.0
+VERSION=0.1
 REPOS_URL=http://104.131.99.199/acquia-site-copy.sh
 INSTALL_PATH=/usr/local/bin/acquia-site-copy
 
