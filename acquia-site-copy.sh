@@ -823,6 +823,12 @@ __print_cached_database()
   fi
 }
 
+
+__print_current_version()
+{
+  echo "Current version: $VERSION" && exit 0
+}
+
 __print_banner
 
 if [ $# -eq 1 ]; then
@@ -838,6 +844,10 @@ if [ $# -eq 1 ]; then
 
     --update|-update)
       __check_update verbose
+      ;;
+
+    --version|-version)
+      __print_current_version
       ;;
 
     *) 
