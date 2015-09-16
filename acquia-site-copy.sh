@@ -460,7 +460,7 @@ __confirm_options()
 
 __issue_ssh_drush_command()
 {
-  ssh $SITE_NAME@$SERVER_URL "$1"
+  ssh ${SITE_NAME}.${ENVIRONMENT}@$SERVER_URL "$1"
 }
 
 
